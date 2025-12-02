@@ -7,11 +7,96 @@
 #include <regex>
 #include <random>
 #include <chrono> // Добавлено для генерации ID
+#include <cstdio> // для sscanf и sprintf
 
 // Используем псевдоним для удобства
 using json = nlohmann::json;
 using namespace std;
 random_device rd;
+
+struct Timestamp {
+    int year, month, day, hour, minute, second;
+
+    // Конструктор из строки
+    Timestamp(const string& ts) {
+        if (sscanf(ts.c_str(), "%d-%d-%dT%d:%d:%d", &year, &month, &day, &hour, &minute, &second) != 6) { // Если успешно записаны не 6
+            cerr << "Could't parse timestamp data" << endl;
+        }
+    }
+
+    // Проверка на високосный год
+    bool isLeap(int y) const {
+        return (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+    }
+
+    // Количество дней в месяце
+    int daysInMonth(int m, int y) const {
+        static const int days[] = {0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+        if (m == 2 && isLeap(y)) return 29;
+        return days[m];
+    }
+
+    // Основная логика инкремента
+    void addSeconds(int secToAdd) {
+        second += secToAdd;
+
+        // Нормализация секунд
+        while (second >= 60) {
+            second -= 60;
+            minute++;
+        }
+        // Нормализация минут
+        while (minute >= 60) {
+            minute -= 60;
+            hour++;
+        }
+        // Нормализация часов
+        while (hour >= 24) {
+            hour -= 24;
+            day++;
+        }
+
+        // Нормализация дней (переход через месяцы и годы)
+        while (true) {
+            int dim = daysInMonth(month, year);
+            if (day <= dim) break; // Если день вписывается в месяц — выходим
+            
+            day -= dim; // Вычитаем дни текущего месяца
+            month++;    // Переходим к следующему
+            
+            if (month > 12) { // Новый год
+                month = 1;
+                year++;
+            }
+        }
+    }
+
+    // Конвертация обратно в строку
+    string toString() const {
+        char buffer[25];
+        // %02d добавляет ведущий ноль, если число меньше 10
+        sprintf(buffer, "%04d-%02d-%02dT%02d:%02d:%02d", year, month, day, hour, minute, second);
+        return string(buffer);
+    }
+    
+    // Валидация 
+    bool isValid() const {
+        if (month < 1 || month > 12) return false;
+        if (day < 1 || day > daysInMonth(month, year)) return false;
+        if (hour < 0 || hour > 23) return false;
+        if (minute < 0 || minute > 59) return false;
+        if (second < 0 || second > 59) return false;
+        return true;
+    }
+};
+
+// Функция-обертка для валидации в Collection::validateDocument
+bool isValidTimestamp(const string& ts) {
+    Timestamp t(ts);
+    // Проверяем формат через регулярку И логическую валидность даты
+    static const regex pattern(R"(^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$)");
+    return regex_match(ts, pattern) && t.isValid();
+}
 
 // Предварительное объявление
 bool matchDocument(const json& doc, const json& query);
@@ -90,7 +175,7 @@ bool matchDocument(const json& doc, const json& query) {
 class Collection {
     string name;
     string path;
-    int tuples_limit;
+    size_t tuples_limit;
     json structure; 
 
     string generateId() {
@@ -115,8 +200,39 @@ class Collection {
         return indexes;
     }
 
+    bool validateDocument(const json& doc, const json& schemaSubset) {
+        for (auto& [key, typeVal] : schemaSubset.items()) {
+            // Проверяем только те поля, которые есть и в документе, и в схеме
+            if (doc.contains(key)) {
+                // Если в схеме это вложенный объект (например, "specs")
+                if (typeVal.is_object()) {
+                    if (!doc[key].is_object()) return false;
+                    // Рекурсивная проверка вложенности
+                    if (!validateDocument(doc[key], typeVal)) return false;
+                } 
+                // Если в схеме это строка с названием типа
+                else if (typeVal.is_string()) {
+                    string type = typeVal.get<string>();
+                    
+                    if (type == "int") {
+                        if (!doc[key].is_number_integer()) return false;
+                    } 
+                    else if (type == "string" || type == "str") {
+                        if (!doc[key].is_string()) return false;
+                    } 
+                    else if (type == "timestamp") {
+                        // Проверяем, что это строка И она соответствует формату
+                        if (!doc[key].is_string()) return false;
+                        if (!isValidTimestamp(doc[key].get<string>())) return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
 public:
-    Collection(string newName, string newPath, int limit, json initialStructure) 
+    Collection(string newName, string newPath, size_t limit, json initialStructure) 
                                                                                 : name(newName),
                                                                                 path(newPath),
                                                                                 tuples_limit(limit),
@@ -131,6 +247,12 @@ public:
     }
 
     void insert(json document) {
+        // Добавлена проверка схемы перед вставкой
+        if (!validateDocument(document, structure)) {
+            cerr << "Error: Document structure or types do not match the schema in collection '" << name << "'." << endl;
+            return; // Прерываем вставку
+        }
+
         string id;
         if (document.contains("_id")) id = document["_id"];
         else id = generateId(); 
@@ -161,6 +283,14 @@ public:
         out.close();
     }
 
+    void insert_one(const json& document) {
+        if (document.is_array()) {
+            cerr << "Expected one document" << endl;
+            return;
+        }
+        insert(document);
+    }
+
     void insert_many(const json& documents) {
         if (!documents.is_array()) {
             cerr << "insert_many expects an array of documents" << endl;
@@ -171,7 +301,7 @@ public:
         }
     }
 
-    json find(const json& query, const json& projection = nullptr) {
+    json find(const json& query, const json& projection = nullptr, bool findOne = false) {
         json result = json::array();
         auto indexes = getFileIndexes();
 
@@ -203,6 +333,7 @@ public:
                     } else {
                         result.push_back(doc);
                     }
+                    if (findOne) return result;
                 }
             }
         }
@@ -210,9 +341,16 @@ public:
     }
 
     json find_one(const json& query, const json& projection = nullptr) {
-        json all = find(query, projection);
-        if (all.size() > 0) return all[0];
-        return nullptr;
+        // Получаем массив результатов (максимум 1 элемент благодаря true)
+        json result = find(query, projection, true);
+        
+        // Если массив пуст - документ не найден
+        if (result.empty()) {
+            return nullptr; 
+        }
+        
+        // Возвращаем первый элемент массива
+        return result[0];
     }
 
     void update(const json& query, const json& updateOps, bool multi = false) {
@@ -238,7 +376,29 @@ public:
                     // Обработка $inc
                     if (updateOps.contains("$inc")) {
                         for (auto& [k, v] : updateOps["$inc"].items()) {
-                            if (doc.contains(k)) doc[k] = doc[k].get<int>() + v.get<int>();
+                            if (doc.contains(k)) {
+                                // Определяем тип из схемы
+                                string fieldType = "";
+                                if (structure.contains(k) && structure[k].is_string()) {
+                                    fieldType = structure[k].get<string>();
+                                }
+
+                                // Логика для Timestamp
+                                if (fieldType == "timestamp") {
+                                    // Создаем структуру из текущей строки
+                                    Timestamp ts(doc[k].get<string>());
+                                    
+                                    // Прибавляем секунды
+                                    ts.addSeconds(v.get<int>());
+                                    
+                                    // Записываем обратно строку
+                                    doc[k] = ts.toString();
+                                } 
+                                // Логика для обычных чисел
+                                else {
+                                    doc[k] = doc[k].get<int>() + v.get<int>();
+                                }
+                            }
                         }
                     }
                     // Обработка $push
@@ -314,7 +474,7 @@ public:
 class DBMS {
     string schemaName;
     string configPath;
-    int tuplesLimit;
+    size_t tuplesLimit;
     map<string, Collection*> collections;
 
 public:
@@ -330,7 +490,8 @@ public:
                         {"name", "str"},
                         {"age", "int"},
                         {"status", "str"},
-                        {"score", "int"}
+                        {"score", "int"},
+                        {"hunted", "timestamp"}
                     }},
                     // Коллекция с вложенной структурой
                     {"products", {
@@ -381,6 +542,7 @@ public:
 };
 
 int main() {
+    setlocale(LC_ALL, "ru");
     // Инициализация СУБД с конфигурацией
     DBMS db("schema.json");
 
@@ -399,10 +561,11 @@ int main() {
     // 1.1 insert_one (вставка одного документа) [cite: 28, 30]
     cout << "Inserting Alice..." << endl;
     users->insert({
-        {"user", "alice"},
+        {"name", "alice"},
         {"age", 25},
         {"status", "active"},
-        {"score", 45}
+        {"score", 45},
+        {"hunted", "2025-02-12T12:00:30"}
     });
 
     // 1.2 insert_many (вставка нескольких документов) [cite: 6, 31, 33]
@@ -413,26 +576,35 @@ int main() {
             {"age", 30}, 
             {"status", "fail"}, 
             {"score", 20},
-            {"priority", "high"}
+            {"priority", "high"},
+            {"hunted", "2025-13-12T12:00:30"}
         },
         {
-            {"user", "carol"}, 
+            {"name", "carol"}, 
             {"age", 20}, 
             {"status", "warn"}, 
-            {"score", 95}
+            {"score", 95},
+            {"hunted", "hi"}
         },
         {
-            {"user", "dave"}, 
+            {"name", "dave"}, 
             {"age", 40}, 
             {"status", "active"}, 
             {"score", 100}
         },
         {
-            {"user", "eve"}, 
+            {"name", "eve"}, 
             {"age", 15}, 
             {"status", "obsolete"}, 
             {"score", 0}
         }
+    });
+
+    users->insert({
+        {"name", "ivan"},
+        {"age", 60},
+        {"status", "best_worker"},
+        {"score", 2000}
     });
     
     // Вывод всех документов [cite: 14, 15]
@@ -459,7 +631,7 @@ int main() {
     // 2.4 Оператор $ne (не равно) [cite: 42]
     cout << "Find user != 'alice' ($ne):" << endl;
     // Ограничим вывод 1 элементом через find_one для краткости, проверяя логику
-    cout << users->find_one({{"user", {{"$ne", "alice"}}}}) << endl;
+    cout << users->find_one({{"name", {{"$ne", "alice"}}}}) << endl;
 
 
     cout << "\n=== 3. LOGICAL OPERATORS (Логические операторы) ===" << endl;
@@ -496,8 +668,8 @@ int main() {
     
     // 4.1 Проекция полей [cite: 13, 23, 24]
     // Вывести только поля "user" и "status" для пользователя "alice"
-    cout << "Projection ['user', 'status'] for 'alice':" << endl;
-    cout << users->find({{"user", "alice"}}, {"user", "status"}).dump(4) << endl;
+    cout << "Projection ['name', 'status'] for 'alice':" << endl;
+    cout << users->find({{"name", "alice"}}, {"name", "status"}).dump(4) << endl;
 
 
     cout << "\n=== 5. FIND_ONE (Найти один) ===" << endl;
@@ -512,10 +684,10 @@ int main() {
     // 6.1 $set (установить значение) [cite: 36]
     cout << "Update 'alice': set status='super_active' ($set)..." << endl;
     users->update_one(
-        {{"user", "alice"}}, 
+        {{"name", "alice"}}, 
         {{"$set", {{"status", "super_active"}}}}
     );
-    cout << "Alice after update: " << users->find_one({{"user", "alice"}}).dump(4) << endl;
+    cout << "Alice after update: " << users->find_one({{"name", "alice"}}).dump(4) << endl;
 
     // 6.2 $inc (инкремент) [cite: 36]
     // Увеличить score на 10 для всех, у кого score < 50
@@ -525,23 +697,23 @@ int main() {
         {{"$inc", {{"score", 10}}}}
     );
     // Проверим Боба (было 20 -> станет 30) и Алису (было 45 -> станет 55)
-    cout << "Bob score: " << users->find_one({{"user", "bob"}})["score"] << endl;
-    cout << "Alice score: " << users->find_one({{"user", "alice"}})["score"] << endl;
+    cout << "Bob score: " << users->find_one({{"name", "bob"}}, {"score"}) << endl;
+    cout << "Alice score: " << users->find_one({{"name", "alice"}})["score"] << endl;
 
     // 6.3 $push (добавление в массив) [cite: 9]
     cout << "Update 'alice': push 'login' to tags ($push)..." << endl;
     users->update_one(
-        {{"user", "alice"}},
+        {{"name", "alice"}},
         {{"$push", {{"tags", "login"}}}}
     );
-    cout << "Alice tags: " << users->find_one({{"user", "alice"}})["tags"] << endl;
+    cout << "Alice tags: " << users->find_one({{"name", "alice"}})["tags"] << endl;
 
 
     cout << "\n=== 7. DELETE (Удаление) ===" << endl;
 
     // 7.1 delete_one (удалить одного) [cite: 10, 39]
     cout << "Deleting 'alice' (delete_one)..." << endl;
-    users->delete_one({{"user", "alice"}});
+    users->delete_one({{"name", "alice"}});
     if (users->find_one({{"user", "alice"}}) == nullptr) {
         cout << "Alice deleted successfully." << endl;
     }
@@ -551,8 +723,8 @@ int main() {
     users->delete_many({{"status", "obsolete"}}); // Удалит 'eve'
     
     // Проверка, что 'eve' удалена, а 'dave' (status: active) остался
-    cout << "Eve found? " << (users->find_one({{"user", "eve"}}) != nullptr) << endl;
-    cout << "Dave found? " << (users->find_one({{"user", "dave"}}) != nullptr) << endl;
+    cout << "Eve found? " << (users->find_one({{"name", "eve"}}) != nullptr) << endl;
+    cout << "Dave found? " << (users->find_one({{"name", "dave"}}) != nullptr) << endl;
 
     return 0;
 }
