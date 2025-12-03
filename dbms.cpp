@@ -1,13 +1,14 @@
 #include <iostream>
 #include <fstream>
 #include <string>
-#include <vector>
 #include <filesystem>
-#include "json.hpp"
 #include <regex>
 #include <random>
 #include <chrono> // Добавлено для генерации ID
 #include <cstdio> // для sscanf и sprintf
+#include "json.hpp"
+#include "array.hpp"
+#include "dh.hpp"
 
 // Используем псевдоним для удобства
 using json = nlohmann::json;
@@ -183,8 +184,8 @@ class Collection {
         return to_string(chrono::system_clock::now().time_since_epoch().count()) + "_" + to_string(gen());
     }
 
-    vector<int> getFileIndexes() {
-        vector<int> indexes;
+    Array<int> getFileIndexes() {
+        Array<int> indexes;
         if (!filesystem::exists(path)) return {1};
         
         for (const auto& entry : filesystem::directory_iterator(path)) {
@@ -192,7 +193,9 @@ class Collection {
             if (fname.find(".json") != string::npos) {
                 try {
                     indexes.push_back(stoi(fname.substr(0, fname.find("."))));
-                } catch (...) {}
+                } catch (...) {
+                    cerr << "Couldn't read json index for " << fname << " skipping..." << endl;
+                }
             }
         }
         if (indexes.empty()) indexes.push_back(1);
@@ -247,10 +250,10 @@ public:
     }
 
     void insert(json document) {
-        // Добавлена проверка схемы перед вставкой
+        // Проверка схемы перед вставкой
         if (!validateDocument(document, structure)) {
             cerr << "Error: Document structure or types do not match the schema in collection '" << name << "'." << endl;
-            return; // Прерываем вставку
+            return;
         }
 
         string id;
@@ -265,7 +268,10 @@ public:
         json fileData;
         if (filesystem::exists(filePath) && filesystem::file_size(filePath) > 0) {
             ifstream in(filePath);
-            try { in >> fileData; } catch(...) { fileData = json::object(); }
+            try { in >> fileData; } catch(...) {
+                fileData = json::object();
+                cerr << "Couldn't read file data from " << filePath << " creating empty json..." << endl;
+            }
             in.close();
         } else {
             fileData = json::object();
@@ -309,7 +315,10 @@ public:
             ifstream in(path + "/" + to_string(idx) + ".json");
             json chunk;
             if (in.good()) {
-                try { in >> chunk; } catch(...) { continue; }
+                try { in >> chunk; } catch(...) {
+                    cerr << "Couldn't read file data from " << path + "/" + to_string(idx) + ".json Skipping..." << endl;
+                    continue;
+                }
             }
             in.close();
 
@@ -363,7 +372,12 @@ public:
             string fpath = path + "/" + to_string(idx) + ".json";
             ifstream in(fpath);
             json chunk; 
-            if (in.good()) { try { in >> chunk; } catch(...) { continue; } }
+                if (in.good()) {
+                    try { in >> chunk; } catch(...) {
+                    cerr << "Couldn't read file data from " << path + "/" + to_string(idx) + ".json Skipping..." << endl;
+                    continue;
+                }
+            }
             in.close();
 
             bool fileChanged = false;
@@ -441,10 +455,15 @@ public:
             string fpath = path + "/" + to_string(idx) + ".json";
             ifstream in(fpath);
             json chunk;
-            if (in.good()) { try { in >> chunk; } catch(...) { continue; } }
+                if (in.good()) {
+                    try { in >> chunk; } catch(...) {
+                    cerr << "Couldn't read file data from " << path + "/" + to_string(idx) + ".json Skipping..." << endl;
+                    continue;
+                }
+            }
             in.close();
 
-            vector<string> keysToDelete;
+            Array<string> keysToDelete;
             for (auto& [key, doc] : chunk.items()) {
                 if (matchDocument(doc, query)) {
                     keysToDelete.push_back(key);
@@ -475,7 +494,7 @@ class DBMS {
     string schemaName;
     string configPath;
     size_t tuplesLimit;
-    map<string, Collection*> collections;
+    DoubleHash<Collection*> collections;
 
 public:
     DBMS(const string& cfgPath) : configPath(cfgPath) {
@@ -514,7 +533,10 @@ public:
         }
         
         json config;
-        try { f >> config; } catch(...) { return; }
+        try { f >> config; } catch(...) {
+            cerr << "Couldn't read schema from " << configPath << endl;
+            return;
+        }
         
         schemaName = config["name"];
         tuplesLimit = config["tuples_limit"];
