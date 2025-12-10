@@ -700,7 +700,7 @@ public:
         Array<string> rawArgs = splitArguments(argsStr);
         ParsedArgs parsed = parseArgsInternal(rawArgs);
 
-        if (!parsed.parseError) return;
+        if (parsed.parseError) return;
 
         try {
             if (method == "find") {
