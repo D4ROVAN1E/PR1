@@ -581,6 +581,7 @@ class ConsoleParser {
         json arg2 = nullptr;  // updateOps или projection
         bool multi = false;   // флаг для update/delete
         bool hasArg2 = false;
+        bool parseError = false;
     };
 
     // Безопасное разделение строки аргументов
@@ -655,6 +656,7 @@ class ConsoleParser {
                 else if (i == 1) { res.arg2 = j; res.hasArg2 = true; }
             } catch (json::parse_error& e) {
                 cerr << "JSON Parse Error at argument " << i+1 << ": " << e.what() << endl;
+                res.parseError = true;
             }
         }
         return res;
@@ -697,6 +699,8 @@ public:
         // Парсинг аргументов
         Array<string> rawArgs = splitArguments(argsStr);
         ParsedArgs parsed = parseArgsInternal(rawArgs);
+
+        if (!parsed.parseError) return;
 
         try {
             if (method == "find") {
