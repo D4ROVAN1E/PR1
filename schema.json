@@ -1,0 +1,24 @@
+{
+    "name": "MyDatabase",
+    "structure": {
+        "products": {
+            "name": "str",
+            "specs": {
+                "cpu": "str",
+                "ram": "int",
+                "screen": {
+                    "size": "int",
+                    "type": "str"
+                }
+            }
+        },
+        "users": {
+            "age": "int",
+            "hunted": "timestamp",
+            "name": "str",
+            "score": "int",
+            "status": "str"
+        }
+    },
+    "tuples_limit": 5
+}
